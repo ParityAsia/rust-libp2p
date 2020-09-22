@@ -8,7 +8,7 @@ use libp2p_core::{
 };
 use log::debug;
 use quickcheck::QuickCheck;
-use libp2p_ca_exchange::{CaExchangeConfig, CA};
+use libp2p_pnet::{PnetConfig, PreSharedKey};
 
 #[test]
 fn variable_msg_length() {
@@ -19,12 +19,10 @@ fn variable_msg_length() {
         let mut msg_to_send = msg.clone();
         let msg_to_receive = msg;
 
-        let root_ca: CA = CA::new(vec![7, 8, 9]);
-        let root_ca_2 = CA::new(vec![7, 8, 9]);
-
-        let local_ca: CA = CA::new(vec![7, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9]);
-        let local_ca_2 = CA::new(vec![7, 8, 9]);
-        let remote_ca: CA = CA::new(vec![7, 8, 9]);
+        let psk = PreSharedKey::new([
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+            17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+        ]);
 
         let server_id = identity::Keypair::generate_ed25519();
         let server_id_public = server_id.public();
@@ -34,14 +32,15 @@ fn variable_msg_length() {
 
         futures::executor::block_on(async {
             let server_transport = libp2p_core::transport::MemoryTransport{}.and_then(move |socket, _| {
-                CaExchangeConfig::new(root_ca.clone(), local_ca.clone()).handshake(socket)
+                PnetConfig::new(psk).handshake(socket)
             });
 
             let client_transport = libp2p_core::transport::MemoryTransport{}.and_then(
                 move |socket, _| {
-                    CaExchangeConfig::new(root_ca_2.clone(), local_ca_2.clone()).handshake(socket)
+                    PnetConfig::new(psk).handshake(socket)
                 }
             );
+
 
             let server_address: Multiaddr = format!(
                 "/memory/{}",
@@ -84,7 +83,7 @@ fn variable_msg_length() {
                 debug!("Server: reading message.");
                 server_channel.read_exact(&mut server_buffer).await.expect("reading client message");
 
-                // assert_eq!(server_buffer, msg_to_receive);
+                assert_eq!(server_buffer, msg_to_receive);
             };
 
             futures::future::join(server_fut, client_fut).await;

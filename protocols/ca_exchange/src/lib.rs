@@ -1,5 +1,4 @@
 
-mod crypt_writer;
 use futures::prelude::*;
 use log::trace;
 use pin_project::pin_project;
@@ -16,25 +15,26 @@ use std::{
 };
 
 /// A pre-shared key, consisting of 32 bytes of random data.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct PreSharedKey([u8; 32]);
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CA(Vec<u8>);
 
-impl PreSharedKey {
+impl CA {
     /// Create a new pre shared key from raw bytes
-    pub fn new(data: [u8; 32]) -> Self {
+    pub fn new(data: Vec<u8>) -> Self {
         Self(data)
     }
 }
 
 /// Private network configuration
-#[derive(Debug, Copy, Clone)]
-pub struct PnetConfig {
+#[derive(Debug, Clone)]
+pub struct CaExchangeConfig {
     /// the PreSharedKey to use for encryption
-    key: PreSharedKey,
+    anchor: CA,
+    cert: CA,
 }
-impl PnetConfig {
-    pub fn new(key: PreSharedKey) -> Self {
-        Self { key }
+impl CaExchangeConfig {
+    pub fn new(anchor: CA, cert: CA) -> Self {
+        Self { anchor: anchor, cert: cert }
     }
 
     /// upgrade a connection to use pre shared key encryption.
@@ -44,39 +44,72 @@ impl PnetConfig {
     pub async fn handshake<TSocket>(
         self,
         mut socket: TSocket,
-    ) -> Result<PnetOutput<TSocket>, PnetError>
+    ) -> Result<CaExchangeOutput<TSocket>, CaExchangeError>
     where
         TSocket: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         trace!("exchanging nonces");
-        let mut local_nonce = [1u8; 32];
-        let mut remote_nonce = [0u8; 32];
+        let mut local_ca: CA;
+        // let mut remote_der = vec!(); // 3072 max length of ca with der format
+        let mut remote_ca = [0u8; 3];
+
+        // let mut remote_vec = vec!();
         // rand::thread_rng().fill_bytes(&mut local_nonce);
+        let ca_len = self.cert.0.len() as u16;
+        let mut ca_len_arr = [0u8; 2];
+        ca_len_arr[0] = (ca_len & 0xFF) as u8;
+        ca_len_arr[1] = ((ca_len >> 8)  & 0xFF) as u8;
         socket
-            .write_all(&local_nonce)
+            .write_all(&ca_len_arr)
             .await
-            .map_err(PnetError::HandshakeError)?;
+            .map_err(CaExchangeError::HandshakeError)?;
         socket
-            .read_exact(&mut remote_nonce)
+            .write_all(&self.cert.0[..])
             .await
-            .map_err(PnetError::HandshakeError)?;
-        trace!("remote nonce is {:?}", remote_nonce);
-        // let write_cipher = XSalsa20::new(&self.key.0.into(), &local_nonce.into());
-        // let read_cipher = XSalsa20::new(&self.key.0.into(), &remote_nonce.into());
-        Ok(PnetOutput::new(socket))
+            .map_err(CaExchangeError::HandshakeError)?;
+
+        let mut remote_len_bytes = [0u8; 2];
+        socket.read_exact(&mut remote_len_bytes)
+            .await
+            .map_err(CaExchangeError::HandshakeError)?;
+        trace!("remote nonce is {:?}", remote_len_bytes);
+        let mut remote_len: usize = 0;
+        remote_len = (remote_len_bytes[0] as usize) + (((remote_len_bytes[1] as u16) << 8) as usize);
+
+        while remote_len > 8 {
+            let mut read_bytes = [0u8; 8];
+
+            socket.read_exact(&mut read_bytes)
+                .await
+                .map_err(CaExchangeError::HandshakeError)?;
+            trace!("remote nonce is {:?}", read_bytes);
+            remote_len -= 8;
+        }
+
+        while remote_len > 0 {
+            let mut read_byte = [0u8; 1];
+
+            socket.read_exact(&mut read_byte)
+                .await
+                .map_err(CaExchangeError::HandshakeError)?;
+            trace!("remote nonce is {:?}", read_byte);
+            remote_len -= 1;
+        }
+
+        Ok(CaExchangeOutput::new(socket))
     }
 }
 
 /// The result of a handshake. This implements AsyncRead and AsyncWrite and can therefore
 /// be used as base for additional upgrades.
 #[pin_project]
-pub struct PnetOutput<S> {
+pub struct CaExchangeOutput<S> {
     #[pin]
     inner: S,
     buf: Vec<u8>,
 }
 
-impl<S: AsyncRead + AsyncWrite> PnetOutput<S> {
+impl<S: AsyncRead + AsyncWrite> CaExchangeOutput<S> {
     fn new(inner: S) -> Self {
         Self {
             inner: inner,
@@ -85,24 +118,17 @@ impl<S: AsyncRead + AsyncWrite> PnetOutput<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite> AsyncRead for PnetOutput<S> {
+impl<S: AsyncRead + AsyncWrite> AsyncRead for CaExchangeOutput<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<Result<usize, io::Error>> {
-        let this = self.project();
-        let result = this.inner.poll_read(cx, buf);
-        if let Poll::Ready(Ok(size)) = &result {
-            trace!("read {} bytes", size);
-            // this.read_cipher.apply_keystream(&mut buf[..*size]);
-            trace!("data before cipher is {:?} ", buf);
-        }
-        result
+        self.project().inner.poll_read(cx, buf)
     }
 }
 
-impl<S: AsyncRead + AsyncWrite> AsyncWrite for PnetOutput<S> {
+impl<S: AsyncRead + AsyncWrite> AsyncWrite for CaExchangeOutput<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -122,35 +148,35 @@ impl<S: AsyncRead + AsyncWrite> AsyncWrite for PnetOutput<S> {
 
 /// Error when writing or reading private swarms
 #[derive(Debug)]
-pub enum PnetError {
+pub enum CaExchangeError {
     /// Error during handshake.
     HandshakeError(IoError),
     /// I/O error.
     IoError(IoError),
 }
 
-impl From<IoError> for PnetError {
+impl From<IoError> for CaExchangeError {
     #[inline]
-    fn from(err: IoError) -> PnetError {
-        PnetError::IoError(err)
+    fn from(err: IoError) -> CaExchangeError {
+        CaExchangeError::IoError(err)
     }
 }
 
-impl error::Error for PnetError {
+impl error::Error for CaExchangeError {
     fn cause(&self) -> Option<&dyn error::Error> {
         match *self {
-            PnetError::HandshakeError(ref err) => Some(err),
-            PnetError::IoError(ref err) => Some(err),
+            CaExchangeError::HandshakeError(ref err) => Some(err),
+            CaExchangeError::IoError(ref err) => Some(err),
         }
     }
 }
 
-impl fmt::Display for PnetError {
+impl fmt::Display for CaExchangeError {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self {
-            PnetError::HandshakeError(e) => write!(f, "Handshake error: {}", e),
-            PnetError::IoError(e) => write!(f, "I/O error: {}", e),
+            CaExchangeError::HandshakeError(e) => write!(f, "Handshake error: {}", e),
+            CaExchangeError::IoError(e) => write!(f, "I/O error: {}", e),
         }
     }
 }

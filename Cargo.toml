@@ -121,5 +121,6 @@ members = [
     "transports/tcp",
     "transports/uds",
     "transports/websocket",
-    "transports/wasm-ext"
+    "transports/wasm-ext",
+    "protocols/ca_exchange"
 ]

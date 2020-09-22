@@ -1,5 +1,5 @@
 [package]
-name = "libp2p-pnet"
+name = "libp2p-ca-exchange"
 edition = "2018"
 description = "Private swarm support for libp2p"
 version = "0.19.1"
